@@ -1,0 +1,184 @@
+/*
+This is a stripped down version of the Adavoice_face consisting of just the eyes
+*/
+
+#include "Adafruit_LEDBackpack.h"
+#include "Adafruit_GFX.h"
+
+uint8_t  adc_save;                          // Default ADC mode
+
+// Used for averaging all the audio samples currently in the buffer
+uint8_t       oldsum = 0;
+unsigned long newsum = 0L;
+
+#define MATRIX_EYES         0
+
+Adafruit_8x8matrix matrix[1] = { // Array of Adafruit_8x8matrix objects (only 1 now)
+  Adafruit_8x8matrix() };
+
+static uint8_t PROGMEM // Bitmaps are stored in program memory
+  blinkImg[][8] = {    // Eye animation frames
+  { B11111100,         // Fully open eye
+    B11111110,         // The eye matrices are installed
+    B11111111,         // in the mask at a 45 degree angle...
+    B11111111,         // you can edit these bitmaps if you opt
+    B11111111,         // for a rectilinear arrangement.
+    B11111111,
+    B01111111,
+    B00111111 },
+  { B11110000,
+    B11111100,
+    B11111110,
+    B11111110,
+    B11111111,
+    B11111111,
+    B01111111,
+    B00111111 },
+  { B11100000,
+    B11111000,
+    B11111100,
+    B11111110,
+    B11111110,
+    B01111111,
+    B00111111,
+    B00011111 },
+  { B11000000,
+    B11110000,
+    B11111000,
+    B11111100,
+    B11111110,
+    B01111110,
+    B00111111,
+    B00011111 },
+  { B10000000,
+    B11100000,
+    B11111000,
+    B11111100,
+    B01111100,
+    B01111110,
+    B00111110,
+    B00001111 },
+  { B10000000,
+    B11000000,
+    B11100000,
+    B11110000,
+    B01111000,
+    B01111100,
+    B00111110,
+    B00001111 },
+  { B10000000,
+    B10000000,
+    B11000000,
+    B01000000,
+    B01100000,
+    B00110000,
+    B00011100,
+    B00000111 },
+  { B10000000,         // Fully closed eye
+    B10000000,
+    B10000000,
+    B01000000,
+    B01000000,
+    B00100000,
+    B00011000,
+    B00000111 } },
+  pupilImg[] = {      // Pupil bitmap
+    B00000000,        // (only top-left 7x7 is used)
+    B00011000,
+    B00111000,
+    B01110000,
+    B01100000,
+    B00000000,
+    B00000000,
+    B00000000 },
+  landingImg[] = {    // This is a bitmask of where
+    B01111000,        // the pupil can safely "land" when
+    B11111100,        // a new random position is selected,
+    B11111110,        // so it doesn't run too far off the
+    B11111110,        // edge and look bad.  If you edit the
+    B11111110,        // eye or pupil bitmaps, you may want
+    B01111110,        // to adjust this...use '1' for valid
+    B00111100,        // pupil positions, '0' for off-limits
+    B00000000 }       // points.
+  },
+  blinkIndex[] = { 1, 2, 3, 4, 5, 6, 7, 6, 5, 3, 2, 1 }, // Blink bitmap sequence
+  matrixAddr[] = { 0x70 }; // I2C addresses of 4 matrices
+
+uint8_t
+  blinkCountdown = 100, // Countdown to next blink (in frames)
+  gazeCountdown  =  75, // Countdown to next eye movement
+  gazeFrames     =  50, // Duration of eye movement (smaller = faster)
+  mouthPos       =   0, // Current image number for mouth
+  mouthCountdown =  10; // Countdown to next mouth change
+int8_t
+  eyeX = 3, eyeY = 3,   // Current eye position
+  newX = 3, newY = 3,   // Next eye position
+  dX   = 0, dY   = 0;   // Distance from prior to new position
+
+
+//////////////////////////////////// SETUP
+
+void setup() {
+  uint8_t i;
+
+  Serial.begin(9600);
+
+  // Seed random number generator from an unused analog input:
+  randomSeed(analogRead(A2));
+
+  // Initialize each matrix object:
+  for(i=0; i<1; i++) {
+    matrix[i].begin(pgm_read_byte(&matrixAddr[i]));
+  }
+
+}
+
+
+//////////////////////////////////// LOOP
+
+void loop() {
+  // Draw eyeball in current state of blinkyness (no pupil).  Note that
+  // only one eye needs to be drawn.  Because the two eye matrices share
+  // the same address, the same data will be received by both.
+  matrix[MATRIX_EYES].clear();
+  // When counting down to the next blink, show the eye in the fully-
+  // open state.  On the last few counts (during the blink), look up
+  // the corresponding bitmap index.
+  matrix[MATRIX_EYES].drawBitmap(0, 0,
+    blinkImg[
+      (blinkCountdown < sizeof(blinkIndex)) ? // Currently blinking?
+      pgm_read_byte(&blinkIndex[blinkCountdown]) :            // Yes, look up bitmap #
+      0                                       // No, show bitmap 0
+    ], 8, 8, LED_ON);
+  // Decrement blink counter.  At end, set random time for next blink.
+  if(--blinkCountdown == 0) blinkCountdown = random(5, 180);
+
+  // Add a pupil atop the blinky eyeball bitmap.
+  // Periodically, the pupil moves to a new position...
+  if(--gazeCountdown <= gazeFrames) {
+    // Eyes are in motion - draw pupil at interim position
+    matrix[MATRIX_EYES].drawBitmap(
+      newX - (dX * gazeCountdown / gazeFrames) - 2,
+      newY - (dY * gazeCountdown / gazeFrames) - 2,
+      pupilImg, 7, 7, LED_OFF);
+    if(gazeCountdown == 0) {    // Last frame?
+      eyeX = newX; eyeY = newY; // Yes.  What's new is old, then...
+      do { // Pick random positions until one is within the eye circle
+        newX = random(7); newY = random(7);
+      } while(!((pgm_read_byte(&landingImg[newY]) << newX) & 0x80));
+      dX            = newX - eyeX;             // Horizontal distance to move
+      dY            = newY - eyeY;             // Vertical distance to move
+      gazeFrames    = random(3, 15);           // Duration of eye movement
+      gazeCountdown = random(gazeFrames, 120); // Count to end of next movement
+    }
+  } else {
+    // Not in motion yet -- draw pupil at current static position
+    matrix[MATRIX_EYES].drawBitmap(eyeX - 2, eyeY - 2, pupilImg, 7, 7, LED_OFF);
+  }
+
+
+  // Refresh all of the matrices in one quick pass
+  for(uint8_t i=0; i<1; i++) matrix[i].writeDisplay();
+
+  delay(20); // ~50 FPS
+}
